@@ -206,15 +206,6 @@ fn create_qr_canvas(size: Size) -> image::GrayImage {
     }
 }
 
-pub fn create_qr_code(content: &str,
-                      size: Size,
-                      level: ECCLevel,
-                      encoding: Option<Encoding>) -> image::GrayImage {
-    //assert!()
-    // TODO
-    image::GrayImage::new(20, 20)
-}
-
 
 //-------------------------------------------------------------------
 // TESTS

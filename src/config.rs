@@ -16,3 +16,14 @@ pub enum ECCLevel {
     Q,      // allows recovery of 25% of the data
     H       // allows recovery of 30% of the data
 }
+
+
+pub enum EncodingMode {
+    Numeric,
+    Alphanumeric,
+    Byte,
+    Kanji,
+    ECI,
+    StructuredAppend,
+    FNC1
+}
