@@ -1,3 +1,4 @@
+#[derive(Clone,Copy)]
 pub enum Encoding {
     Numeric,            // only digits allowed [0-9]
     Alphanumeric,       // digits, capital letters and nine other chars [0-9A-Z$%*+-./: ]
@@ -5,6 +6,7 @@ pub enum Encoding {
     Kanji               // Kanji characters
 }
 
+#[derive(Clone,Copy)]
 pub enum Size {
     Micro(u8),         // versions M1 through M3
     Standard(u8)       // versions 1 through 40

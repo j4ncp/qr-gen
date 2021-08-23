@@ -4,50 +4,45 @@ use std::convert::TryInto;
 
 use bitstream_io::{BitWriter, BitWrite, BigEndian};
 
-type QrBitWriter = BitWriter<Vec<u8>, BigEndian>;
+type QrBitWriter<'a> = BitWriter<&'a mut Vec<u8>, BigEndian>;
 
 
 
-fn write_mode_indicator(stream: &mut QrBitWriter, size: Size, ecm: EncodingMode) {
+fn write_mode_indicator(stream: &mut QrBitWriter, size: Size, ec: Encoding) {
     if let Size::Micro(i) = size {
         if i == 1 {
             // no mode indicator for M1 tags
             return;
         } else if i == 2 {
             // one bit: 0 => Numeric, 1 => Alphanumeric
-            stream.write(1, match ecm {
-                EncodingMode::Numeric => 0,
-                EncodingMode::Alphanumeric => 1,
+            stream.write(1, match ec {
+                Encoding::Numeric => 0,
+                Encoding::Alphanumeric => 1,
                 _ => panic!("Invalid encoding mode for chosen size!")
             }).unwrap();
         } else if i == 3 {
             // two bits
-            stream.write(2, match ecm {
-                EncodingMode::Numeric => 0b00,
-                EncodingMode::Alphanumeric => 0b01,
-                EncodingMode::Byte => 0b10,
-                EncodingMode::Kanji => 0b11,
-                _ => panic!("Invalid encoding mode for chosen size!")
+            stream.write(2, match ec {
+                Encoding::Numeric => 0b00,
+                Encoding::Alphanumeric => 0b01,
+                Encoding::Bytes => 0b10,
+                Encoding::Kanji => 0b11
             }).unwrap();
         } else if i == 4 {
             // three bits
-            stream.write(3, match ecm {
-                EncodingMode::Numeric => 0b000,
-                EncodingMode::Alphanumeric => 0b001,
-                EncodingMode::Byte => 0b010,
-                EncodingMode::Kanji => 0b011,
-                _ => panic!("Invalid encoding mode for chosen size!")
+            stream.write(3, match ec {
+                Encoding::Numeric => 0b000,
+                Encoding::Alphanumeric => 0b001,
+                Encoding::Bytes => 0b010,
+                Encoding::Kanji => 0b011
             }).unwrap();
         }
     } else if let Size::Standard(_) = size {
-        stream.write(4, match ecm {
-            EncodingMode::Numeric => 0b0001,
-            EncodingMode::Alphanumeric => 0b0010,
-            EncodingMode::Byte => 0b0100,
-            EncodingMode::Kanji => 0b1000,
-            EncodingMode::ECI => 0b0111,
-            EncodingMode::StructuredAppend => 0b0011,
-            EncodingMode::FNC1 => 0b0101    // TODO!
+        stream.write(4, match ec {
+            Encoding::Numeric => 0b0001,
+            Encoding::Alphanumeric => 0b0010,
+            Encoding::Bytes => 0b0100,
+            Encoding::Kanji => 0b1000
         }).unwrap();
     }
 }
@@ -104,17 +99,60 @@ fn write_charcount_indicator(stream: &mut QrBitWriter, count: u32, size: Size, e
     stream.write(num_bits, count).unwrap();
 }
 
+/// Write a terminator bit sequence to the stream. This is done if
+/// the message+terminator does not reach the capacity of the specified
+/// QR symbol size.
+pub fn write_terminator(stream: &mut QrBitWriter, size: Size) {
+    // write a specified number of zeroes, depending on the code model
+    stream.write(match size {
+        Size::Micro(1) => 3,
+        Size::Micro(2) => 5,
+        Size::Micro(3) => 7,
+        Size::Micro(4) => 9,
+        Size::Standard(_) => 4,
+        _ => panic!("Invalid size given")
+    }, 0).unwrap();
+}
+
+/// Write an ECI header to the bitstream, which changes the interpretation
+/// of the following encoded message, until another ECI header is encountered.
+///
+/// assignment is a decimal 6-digit number between 000000 and 999999 specifying
+/// the encoding (as defined by the AIM ECI specification).
+///
+/// The ECI header can be omitted completely; in that case, the default
+/// interpretation is Shift JIS X 0208 for "kanji" mode and ISO/IEC 8859-1
+/// for the other three modes.
+pub fn write_eci_header(stream: &mut QrBitWriter, assignment: u32) {
+    // write ECI mode indicator
+    stream.write(4, 0b0111).unwrap();
+    // depending on value of assignment, encode it as either 1, 2 or 3
+    // bytes
+    if assignment < 128 {
+        // encode as 0bbbbbbb
+        stream.write(1, 0).unwrap();
+        stream.write(7, assignment).unwrap();
+    } else if assignment >= 128 && assignment < 16384 {
+        // encode as 10bbbbbb bbbbbbbb
+        stream.write(2, 0b10).unwrap();
+        stream.write(14, assignment).unwrap();
+    } else /* assigment >= 16384 && assigment < 1000000 */ {
+        // encode as 110bbbbb bbbbbbbb bbbbbbbb
+        stream.write(3, 0b110).unwrap();
+        stream.write(21, assignment).unwrap();
+    }
+}
 
 fn encode_numeric_data(stream: &mut QrBitWriter, input: &[u8]) {
     // iterate over input; group into
     // three digits and treat them as a decimal number between 0 and 999,
     // encode that number in 10 binary digits.
     let mut i = 0;         // 0-index of current digit in triplet
-    let mut cur_code = 0;  // current value of triplet
+    let mut cur_code: u32 = 0;  // current value of triplet
     for &l in input {
         assert!(l >= 0x30 || l <= 0x39);    // ASCII codes for digits 0 to 9
         let digit = l - 0x30;
-        cur_code = cur_code * 10 + digit;
+        cur_code = cur_code * 10 + digit as u32;
         i += 1;
         if i == 3 {
             // got triplet. write the code to the bitstream and reset state
@@ -155,9 +193,9 @@ fn encode_alphanumeric_data(stream: &mut QrBitWriter, input: &[u8]) {
     // two chars and multiply the first by 45, sum with second one.
     // encode that number in 11 binary digits.
     let mut i = 0;         // 0-index of current digit in triplet
-    let mut cur_code = 0;  // current value of triplet
+    let mut cur_code: u32 = 0;  // current value of triplet
     for &l in input {
-        cur_code = cur_code * 45 + map_alphanumeric(l);
+        cur_code = cur_code * 45 + map_alphanumeric(l) as u32;
         i += 1;
         if i == 2 {
             // got pair. write the code to the bitstream and reset state
@@ -200,10 +238,41 @@ fn encode_kanji_data(stream: &mut QrBitWriter, input: &[u8]) {
     }
 }
 
-
-fn encode_data_segment(stream: &mut QrBitWriter, input: &[u8], ec: Encoding, size: Size) {
-    // TODO
+/// Write a given sequence of ISO/IEC 8859-1 or Shift JIS X 0208 encoded bytes
+/// to a bitstream (default ECI). For simple QR codes this is the entire coded message.
+///
+/// Segments can be chained to encode parts of the message in different modes.
+///
+/// To use non-default ECIs, write the ECI header to the stream first, then call this
+/// function to write data in any of the four supported encoding modes. The ECI changes the
+/// interpretation of the encoded data. In most cases you will want to use the "bytes" encoding
+/// there. See
+pub fn encode_data_segment(stream: &mut QrBitWriter, input: &[u8], ec: Encoding, size: Size) {
+    write_mode_indicator(stream, size, ec);
+    match ec {
+        Encoding::Numeric => {
+            write_charcount_indicator(stream, input.len() as u32, size, ec);
+            encode_numeric_data(stream, input);
+        },
+        Encoding::Alphanumeric => {
+            write_charcount_indicator(stream, input.len() as u32, size, ec);
+            encode_alphanumeric_data(stream, input);
+        },
+        Encoding::Bytes => {
+            write_charcount_indicator(stream, input.len() as u32, size, ec);
+            encode_byte_data(stream, input);
+        },
+        Encoding::Kanji => {
+            write_charcount_indicator(stream, input.len() as u32 / 2, size, ec);
+            encode_kanji_data(stream, input);
+        }
+    }
 }
+
+// TODO: structured append (see Chapter 8, page 67)
+
+// TODO: FCN1 format (see Chapter 7.4.8, page 38)
+
 
 //-------------------------------------------------------------------
 // TESTS
@@ -211,10 +280,57 @@ fn encode_data_segment(stream: &mut QrBitWriter, input: &[u8], ec: Encoding, siz
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{GenericImageView, ImageResult};
 
-    # [test]
-    fn test_bla() {
+    #[test]
+    fn test_numeric_example_1() {
+        let mut data: Vec<u8> = Vec::new();
+        let (bits, value) = {
+            let mut stream = QrBitWriter::new(&mut data);
+            encode_data_segment(&mut stream, b"01234567", Encoding::Numeric, Size::Standard(1));
+            stream.into_unwritten()
+        };
+        assert_eq!(data, [0b0001_0000, 0b0010_0000, 0b0000_1100, 0b0101_0110, 0b0110_0001]);
+        assert_eq!(bits, 1);  // one bit left over
+        assert_eq!(value, 1); // that bit is a 1
+    }
 
+    #[test]
+    fn test_numeric_example_2() {
+        let mut data: Vec<u8> = Vec::new();
+        let (bits, value) = {
+            let mut stream = QrBitWriter::new(&mut data);
+            encode_data_segment(&mut stream, b"0123456789012345", Encoding::Numeric, Size::Micro(3));
+            stream.into_unwritten()
+        };
+        assert_eq!(data, [0b0010_0000, 0b0000_0110, 0b0010_1011, 0b0011_0101, 0b0011_0111,
+                          0b0000_1010, 0b0111_0101]);
+        assert_eq!(bits, 5);  // five bits left over
+        assert_eq!(value, 5); // value of those is 00101, so 5
+    }
+
+    #[test]
+    fn test_alphanumeric_example() {
+        let mut data: Vec<u8> = Vec::new();
+        let (bits, value) = {
+            let mut stream = QrBitWriter::new(&mut data);
+            encode_data_segment(&mut stream, b"AC-42", Encoding::Alphanumeric, Size::Standard(1));
+            stream.into_unwritten()
+        };
+        assert_eq!(data, [0b0010_0000, 0b0010_1001, 0b1100_1110, 0b1110_0111, 0b0010_0001]);
+        assert_eq!(bits, 1);  // one bit left over
+        assert_eq!(value, 0); // value of that bit is zero
+    }
+
+    #[test]
+    fn test_kanji_example() {
+        let mut data: Vec<u8> = Vec::new();
+        let (bits, value) = {
+            let mut stream = QrBitWriter::new(&mut data);
+            encode_data_segment(&mut stream, &[0x93, 0x5F, 0xE4, 0xAA], Encoding::Kanji, Size::Standard(1));
+            stream.into_unwritten()
+        };
+        assert_eq!(data, [0b1000_0000, 0b0010_0110, 0b1100_1111, 0b1110_1010]);
+        assert_eq!(bits, 6);  // six bits left over
+        assert_eq!(value, 0b101010); // those bits are 0b101010
     }
 }
