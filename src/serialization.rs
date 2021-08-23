@@ -4,14 +4,13 @@ use crate::config::{Size, ECCLevel, Encoding};
 
 use image;
 
-/// During the assembly of the QR code pixel matrix
-/// there are different value codes used as pixel values
-/// to indicate pixels that will be filled in later.
-/// As such those later stages can identify those pixels
-/// easier. Final values are only 0 (black) and 255 (white).
-/// All other values are codes, and are used in the following way:
-///   100: everything not filled by the canvas creation function
+// CONSTANTS
+const MARKER_ENCODING_REGION: image::Luma<u8> = image::Luma([100u8]);
+const MARKER_FORMAT_INFORMATION: image::Luma<u8> = image::Luma([120u8]);
+const MARKER_VERSION_INFORMATION: image::Luma<u8> = image::Luma([140u8]);
 
+const BIT_WHITE: image::Luma<u8> = image::Luma([255u8]);
+const BIT_BLACK: image::Luma<u8> = image::Luma([0u8]);
 
 /// Creates a finder pattern image (concentric squares
 /// including the white separator around the finder
@@ -20,9 +19,9 @@ fn create_finder_pattern() -> image::GrayImage {
     image::GrayImage::from_fn(9,9, |x, y| {
         let r = cmp::max((x as i32 - 4).abs(), (y as i32 - 4).abs());
         if r < 2 || r == 3 {
-            image::Luma([0u8])
+            BIT_BLACK
         } else {
-            image::Luma([255u8])
+            BIT_WHITE
         }
     })
 }
@@ -32,9 +31,9 @@ fn create_alignment_pattern() -> image::GrayImage {
     image::GrayImage::from_fn(5, 5, |x, y| {
         let r = cmp::max((x as i32 - 2).abs(), (y as i32 - 2).abs());
         if r % 2 == 0 {
-            image::Luma([0u8])
+            BIT_BLACK
         } else {
-            image::Luma([255u8])
+            BIT_WHITE
         }
     })
 }
@@ -121,15 +120,15 @@ fn get_alignment_pattern_points(size: u8) -> Vec<(i32, i32)> {
 fn create_standard_qt_canvas(size: u8) -> image::GrayImage {
     assert!(size >= 1 && size <= 40);
     let s = 17 + 4 * size as u32 + 8; // the +8 is for the quiet zone, 4 to each side
-    let mut mask = image::GrayImage::from_pixel(s, s, image::Luma([100u8]));
+    let mut mask = image::GrayImage::from_pixel(s, s, MARKER_ENCODING_REGION);
 
     // mark quiet area
     for i in 0..s {
         for j in 0..4 {
-            mask[(j, i)] = image::Luma([255u8]);
-            mask[(i, j)] = image::Luma([255u8]);
-            mask[(s - j - 1, i)] = image::Luma([255u8]);
-            mask[(i, s - j - 1)] = image::Luma([255u8]);
+            mask[(j, i)] = BIT_WHITE;
+            mask[(i, j)] = BIT_WHITE;
+            mask[(s - j - 1, i)] = BIT_WHITE;
+            mask[(i, s - j - 1)] = BIT_WHITE;
         }
     }
 
@@ -141,7 +140,7 @@ fn create_standard_qt_canvas(size: u8) -> image::GrayImage {
 
     // mark timing patterns
     for i in 10..s-12 {
-        let val = if i % 2 == 0 {image::Luma([0u8])} else {image::Luma([255u8])};
+        let val = if i % 2 == 0 {BIT_BLACK} else {BIT_WHITE};
         mask[(10, i)] = val;
         mask[(i, 10)] = val;
     }
@@ -160,6 +159,31 @@ fn create_standard_qt_canvas(size: u8) -> image::GrayImage {
         }
     }
 
+    // mark format bits
+    for i in 0..6 {
+        mask[(12, 4+i)] = MARKER_FORMAT_INFORMATION;
+        mask[(4+i, 12)] = MARKER_FORMAT_INFORMATION;
+        mask[(s-5-i, 12)] = MARKER_FORMAT_INFORMATION;
+        mask[(12, s-5-i)] = MARKER_FORMAT_INFORMATION;
+    }
+    mask[(12, 11)] = MARKER_FORMAT_INFORMATION;
+    mask[(11, 12)] = MARKER_FORMAT_INFORMATION;
+    mask[(12, 12)] = MARKER_FORMAT_INFORMATION;
+    mask[(12, s-11)] = MARKER_FORMAT_INFORMATION;
+    mask[(12, s-12)] = MARKER_FORMAT_INFORMATION;
+    mask[(s-11, 12)] = MARKER_FORMAT_INFORMATION;
+    mask[(s-12, 12)] = MARKER_FORMAT_INFORMATION;
+
+    // mark version bits if applicable
+    if size >= 7 {
+        for i in 0..6 {
+            for j in 0..3 {
+                mask[(4+i, s-13-j)] = MARKER_FORMAT_INFORMATION;
+                mask[(s-13-j, 4+i)] = MARKER_FORMAT_INFORMATION;
+            }
+        }
+    }
+
     // return canvas
     mask
 }
@@ -168,15 +192,15 @@ fn create_standard_qt_canvas(size: u8) -> image::GrayImage {
 fn create_mini_qr_canvas(size: u8) -> image::GrayImage {
     assert!(size >= 1 && size <= 4);
     let s = 9 + 2 * size as u32 + 4;  // the +4 is for the quiet zone, 2 to each side
-    let mut mask = image::GrayImage::from_pixel(s, s, image::Luma([100u8]));
+    let mut mask = image::GrayImage::from_pixel(s, s, MARKER_ENCODING_REGION);
 
     // mark quiet area
     for i in 0..s {
         for j in 0..2 {
-            mask[(j, i)] = image::Luma([255u8]);
-            mask[(i, j)] = image::Luma([255u8]);
-            mask[(s - j - 1, i)] = image::Luma([255u8]);
-            mask[(i, s - j - 1)] = image::Luma([255u8]);
+            mask[(j, i)] = BIT_WHITE;
+            mask[(i, j)] = BIT_WHITE;
+            mask[(s - j - 1, i)] = BIT_WHITE;
+            mask[(i, s - j - 1)] = BIT_WHITE;
         }
     }
 
@@ -185,21 +209,40 @@ fn create_mini_qr_canvas(size: u8) -> image::GrayImage {
 
     // mark timing patterns
     for i in 10..s-2 {
-        let val = if i % 2 == 0 {image::Luma([0u8])} else {image::Luma([255u8])};
+        let val = if i % 2 == 0 {BIT_BLACK} else {BIT_WHITE};
         mask[(2, i)] = val;
         mask[(i, 2)] = val;
     }
 
     // no alignment patterns
 
+    // mark format bits
+    for i in 3..11 {
+        mask[(10, i)] = MARKER_FORMAT_INFORMATION;
+        mask[(i, 10)] = MARKER_FORMAT_INFORMATION;
+    }
+
     // return canvas
     mask
 }
 
-/// Return a basic QR image with all the basic furnishings
-/// of a QR code: the finder patterns, alignment patterns
+/// Return a basic QR image with all the functional patterns
+/// painted in: the finder patterns, alignment patterns
 /// and timing patterns.
-fn create_qr_canvas(size: Size) -> image::GrayImage {
+///
+/// During the assembly of the QR code pixel matrix
+/// there are different value codes used as pixel values
+/// to indicate pixels that will be filled in later.
+/// As such those later stages can identify those pixels
+/// easier. Final values are only 0 (black) and 255 (white).
+/// All other values are codes, and are used in the following way:
+///   100: the encoding region, which receives the binary code
+///   120: marks the format information bits (stripes along finders),
+///        2x 15 bits
+///   140: marks the version information bits (blocks near upper
+///        right and lower left finder) 2x 18bits
+///        (only present in codes of version 7 or up)
+pub fn create_qr_canvas(size: Size) -> image::GrayImage {
     match size {
         Size::Micro(s) => create_mini_qr_canvas(s),
         Size::Standard(s) => create_standard_qt_canvas(s)
