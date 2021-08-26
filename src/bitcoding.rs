@@ -1,10 +1,10 @@
-use crate::config::{EncodingMode, Size, Encoding};
+use crate::config::{Size, Encoding};
 
 use std::convert::TryInto;
 
 use bitstream_io::{BitWriter, BitWrite, BigEndian};
 
-type QrBitWriter<'a> = BitWriter<&'a mut Vec<u8>, BigEndian>;
+pub type QrBitWriter<'a> = BitWriter<&'a mut Vec<u8>, BigEndian>;
 
 
 

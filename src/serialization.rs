@@ -256,7 +256,6 @@ pub fn create_qr_canvas(size: Size) -> image::GrayImage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{GenericImageView, ImageResult};
 
     #[test]
     fn test_canvas_sizes() {
