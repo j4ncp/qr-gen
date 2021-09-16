@@ -97,6 +97,9 @@ impl SymbolCapacity {
     pub fn ecc_words(&self) -> u32 {
         &self.codewords() - &self.data_codewords()
     }
+
+    /// compute and return the number of ecc codewords per block for this symbol
+    pub fn ecc_words_per_block(&self) -> u32 { &self.block_def1.codewords - &self.block_def1.data_codewords }
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
