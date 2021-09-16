@@ -1,14 +1,19 @@
 use crate::config::{Size, Encoding};
 
+use crate::tables::lookup_capacity;
+
 use std::convert::TryInto;
+use std::cmp;
 
-use bitstream_io::{BitWriter, BitWrite, BigEndian};
+use bitstream_io::{BitWriter, BitRecorder, BitWrite, BigEndian};
+use crate::ECCLevel;
 
+pub type QrBitRecorder = BitRecorder<u32, BigEndian>;
 pub type QrBitWriter<'a> = BitWriter<&'a mut Vec<u8>, BigEndian>;
 
 
 
-fn write_mode_indicator(stream: &mut QrBitWriter, size: Size, ec: Encoding) {
+fn write_mode_indicator(stream: &mut QrBitRecorder, size: Size, ec: Encoding) {
     if let Size::Micro(i) = size {
         if i == 1 {
             // no mode indicator for M1 tags
@@ -47,7 +52,7 @@ fn write_mode_indicator(stream: &mut QrBitWriter, size: Size, ec: Encoding) {
     }
 }
 
-fn write_charcount_indicator(stream: &mut QrBitWriter, count: u32, size: Size, ec: Encoding) {
+fn write_charcount_indicator(stream: &mut QrBitRecorder, count: u32, size: Size, ec: Encoding) {
     let num_bits = match size {
         Size::Micro(1) => match ec {
             Encoding::Numeric => 3,
@@ -99,19 +104,18 @@ fn write_charcount_indicator(stream: &mut QrBitWriter, count: u32, size: Size, e
     stream.write(num_bits, count).unwrap();
 }
 
-/// Write a terminator bit sequence to the stream. This is done if
-/// the message+terminator does not reach the capacity of the specified
-/// QR symbol size.
-pub fn write_terminator(stream: &mut QrBitWriter, size: Size) {
+/// Retrieve the number of terminator bits for the given Symbol size
+/// (those bits would all be zeroes)
+fn terminator_length(size: Size) -> u32 {
     // write a specified number of zeroes, depending on the code model
-    stream.write(match size {
+    match size {
         Size::Micro(1) => 3,
         Size::Micro(2) => 5,
         Size::Micro(3) => 7,
         Size::Micro(4) => 9,
         Size::Standard(_) => 4,
         _ => panic!("Invalid size given")
-    }, 0).unwrap();
+    }
 }
 
 /// Write an ECI header to the bitstream, which changes the interpretation
@@ -123,7 +127,7 @@ pub fn write_terminator(stream: &mut QrBitWriter, size: Size) {
 /// The ECI header can be omitted completely; in that case, the default
 /// interpretation is Shift JIS X 0208 for "kanji" mode and ISO/IEC 8859-1
 /// for the other three modes.
-pub fn write_eci_header(stream: &mut QrBitWriter, assignment: u32) {
+pub fn write_eci_header(stream: &mut QrBitRecorder, assignment: u32) {
     // write ECI mode indicator
     stream.write(4, 0b0111).unwrap();
     // depending on value of assignment, encode it as either 1, 2 or 3
@@ -143,7 +147,7 @@ pub fn write_eci_header(stream: &mut QrBitWriter, assignment: u32) {
     }
 }
 
-fn encode_numeric_data(stream: &mut QrBitWriter, input: &[u8]) {
+fn encode_numeric_data(stream: &mut QrBitRecorder, input: &[u8]) {
     // iterate over input; group into
     // three digits and treat them as a decimal number between 0 and 999,
     // encode that number in 10 binary digits.
@@ -188,7 +192,7 @@ fn map_alphanumeric(in_char: u8) -> u8 {
     }
 }
 
-fn encode_alphanumeric_data(stream: &mut QrBitWriter, input: &[u8]) {
+fn encode_alphanumeric_data(stream: &mut QrBitRecorder, input: &[u8]) {
     // iterate over input; group into
     // two chars and multiply the first by 45, sum with second one.
     // encode that number in 11 binary digits.
@@ -210,7 +214,7 @@ fn encode_alphanumeric_data(stream: &mut QrBitWriter, input: &[u8]) {
     }
 }
 
-fn encode_byte_data(stream: &mut QrBitWriter, input: &[u8]) {
+fn encode_byte_data(stream: &mut QrBitRecorder, input: &[u8]) {
     // assume byte data is already ISO8859-1 encoded,
     // so just write those as bits
     for &l in input {
@@ -218,7 +222,7 @@ fn encode_byte_data(stream: &mut QrBitWriter, input: &[u8]) {
     }
 }
 
-fn encode_kanji_data(stream: &mut QrBitWriter, input: &[u8]) {
+fn encode_kanji_data(stream: &mut QrBitRecorder, input: &[u8]) {
     // we assume input is encoded in Shift JIS (see JIS X 0208)
     // using two bytes per character. Every character is compacted
     // into a 13bit codeword and written to the output.
@@ -247,7 +251,7 @@ fn encode_kanji_data(stream: &mut QrBitWriter, input: &[u8]) {
 /// function to write data in any of the four supported encoding modes. The ECI changes the
 /// interpretation of the encoded data. In most cases you will want to use the "bytes" encoding
 /// there. See
-pub fn encode_data_segment(stream: &mut QrBitWriter, input: &[u8], ec: Encoding, size: Size) {
+pub fn encode_data_segment(stream: &mut QrBitRecorder, input: &[u8], ec: Encoding, size: Size) {
     write_mode_indicator(stream, size, ec);
     match ec {
         Encoding::Numeric => {
@@ -274,6 +278,99 @@ pub fn encode_data_segment(stream: &mut QrBitWriter, input: &[u8], ec: Encoding,
 // TODO: FCN1 format (see Chapter 7.4.8, page 38)
 
 
+/// takes a recorded sequence of mode segments, maybe interspersed with
+/// ECI headers and maybe containing more complex data sequences and finalizes it,
+/// returning a sequence of codewords as a byte array. The finalization entails potentially
+/// appending a terminator sequence, adding zero bits to byte-align the sequence and potentially
+/// adding padding bytes to fill the chosen symbol's capacity exactly.
+pub fn finalize_bitstream(mut stream: QrBitRecorder, size: Size, ecl: ECCLevel) -> Vec<u8> {
+    let bit_capacity = lookup_capacity(size, ecl).data_bits;
+
+    // append terminator bits. At most as many zeroes as specified, and at least as many
+    // of those as can fit within the symbol capacity.
+    {
+        let bit_rawdatasize = stream.written();
+        assert!(bit_rawdatasize <= bit_capacity, "Too many data bits for chosen symbol size {:?}!", size);
+
+        let terminator_bits = cmp::min(bit_capacity - bit_rawdatasize, terminator_length(size));
+        stream.write(terminator_bits, 0).unwrap();
+    }
+
+    // pad with zeroes to next full byte
+    {
+        let written = stream.written();
+        let alignment = written % 8;
+
+        // if we are already byte-aligned there is nothing to do.
+        if alignment > 0 {
+            let padding = 8 - alignment;
+
+            // special case: last word in M1 and M3 symbols is only 4 bits
+            if (size == Size::Micro(1) || size == Size::Micro(3)) &&
+               written + 4 > bit_capacity {
+                // if we are already into those 4 last bits, just pad those with zeroes completely
+                stream.write(bit_capacity - written, 0).unwrap();
+            } else {
+                // simply add zero padding
+                stream.write(padding, 0).unwrap();
+            }
+        }
+    }
+
+    // pad alternately with the two specified codewords 0b11101100 and 0b00010001
+    // until capacity is filled.
+    {
+        let bits_left = bit_capacity - stream.written();
+        let bytes_left = bits_left / 8;
+
+        // Note: the integer division by 8 is correct in all cases, because:
+        //      - for standard sizes the capacity is a multiple of 8 and also the stream contains
+        //        a multiple of 8 bits. So bits_left is also multiple of 8.
+        //      - for M1 and M3 sizes, the capacity is a multiple of 8 plus 4, while bits_left is
+        //        either zero, four, or a multiple of 8 plus four. So in the first two cases bytes_left
+        //        is zero, and in the third will return the remaining multiplicity of 8, which is correct.
+
+        // pad bytes_left with special codewords
+        const PAD_CODEWORDS: [u32; 2] = [0b11101100, 0b00010001];
+        for i in 0..bytes_left {
+            let padding = PAD_CODEWORDS[i as usize % 2];
+            stream.write(padding, 8).unwrap();
+        }
+    }
+
+    // now truly the only thing left could be to set the last four missing bits in
+    // a M1 or M3 symbol to zero.
+    {
+        let bits_left = bit_capacity - stream.written();
+
+        if (size == Size::Micro(1) || size == Size::Micro(3)) && bits_left > 0 {
+            assert_eq!(bits_left, 4);
+            stream.write(bits_left, 0).unwrap();
+        } else {
+            // otherwise no bits should be left, ever
+            assert_eq!(bits_left, 0);
+        }
+    }
+
+    assert_eq!(stream.written(), bit_capacity);
+
+    // add four more zero bits in the case of M1 and M3 symbols, so we can return
+    // as a vector of full bytes
+    if size == Size::Micro(1) || size == Size::Micro(3) {
+        stream.write(4, 0).unwrap();
+    }
+
+    // create a bit writer on a vector, play back all bits to it.
+    let mut data_codewords: Vec<u8> = Vec::new();
+    {
+        let mut writer = QrBitWriter::new(&mut data_codewords);
+        stream.playback(&mut writer).unwrap();
+    }
+
+    data_codewords
+}
+
+
 //-------------------------------------------------------------------
 // TESTS
 //-------------------------------------------------------------------
@@ -283,11 +380,14 @@ mod tests {
 
     #[test]
     fn test_numeric_example_1() {
+        let mut recorder = QrBitRecorder::new();
+        encode_data_segment(&mut recorder, b"01234567", Encoding::Numeric, Size::Standard(1));
+
         let mut data: Vec<u8> = Vec::new();
         let (bits, value) = {
-            let mut stream = QrBitWriter::new(&mut data);
-            encode_data_segment(&mut stream, b"01234567", Encoding::Numeric, Size::Standard(1));
-            stream.into_unwritten()
+            let mut writer = QrBitWriter::new(&mut data);
+            recorder.playback(&mut writer).unwrap();
+            writer.into_unwritten()
         };
         assert_eq!(data, [0b0001_0000, 0b0010_0000, 0b0000_1100, 0b0101_0110, 0b0110_0001]);
         assert_eq!(bits, 1);  // one bit left over
@@ -296,11 +396,14 @@ mod tests {
 
     #[test]
     fn test_numeric_example_2() {
+        let mut recorder = QrBitRecorder::new();
+        encode_data_segment(&mut recorder, b"0123456789012345", Encoding::Numeric, Size::Micro(3));
+
         let mut data: Vec<u8> = Vec::new();
         let (bits, value) = {
-            let mut stream = QrBitWriter::new(&mut data);
-            encode_data_segment(&mut stream, b"0123456789012345", Encoding::Numeric, Size::Micro(3));
-            stream.into_unwritten()
+            let mut writer = QrBitWriter::new(&mut data);
+            recorder.playback(&mut writer).unwrap();
+            writer.into_unwritten()
         };
         assert_eq!(data, [0b0010_0000, 0b0000_0110, 0b0010_1011, 0b0011_0101, 0b0011_0111,
                           0b0000_1010, 0b0111_0101]);
@@ -310,11 +413,14 @@ mod tests {
 
     #[test]
     fn test_alphanumeric_example() {
+        let mut recorder = QrBitRecorder::new();
+        encode_data_segment(&mut recorder, b"AC-42", Encoding::Alphanumeric, Size::Standard(1));
+
         let mut data: Vec<u8> = Vec::new();
         let (bits, value) = {
-            let mut stream = QrBitWriter::new(&mut data);
-            encode_data_segment(&mut stream, b"AC-42", Encoding::Alphanumeric, Size::Standard(1));
-            stream.into_unwritten()
+            let mut writer = QrBitWriter::new(&mut data);
+            recorder.playback(&mut writer).unwrap();
+            writer.into_unwritten()
         };
         assert_eq!(data, [0b0010_0000, 0b0010_1001, 0b1100_1110, 0b1110_0111, 0b0010_0001]);
         assert_eq!(bits, 1);  // one bit left over
@@ -323,14 +429,19 @@ mod tests {
 
     #[test]
     fn test_kanji_example() {
+        let mut recorder = QrBitRecorder::new();
+        encode_data_segment(&mut recorder, &[0x93, 0x5F, 0xE4, 0xAA], Encoding::Kanji, Size::Standard(1));
+
         let mut data: Vec<u8> = Vec::new();
         let (bits, value) = {
-            let mut stream = QrBitWriter::new(&mut data);
-            encode_data_segment(&mut stream, &[0x93, 0x5F, 0xE4, 0xAA], Encoding::Kanji, Size::Standard(1));
-            stream.into_unwritten()
+            let mut writer = QrBitWriter::new(&mut data);
+            recorder.playback(&mut writer).unwrap();
+            writer.into_unwritten()
         };
         assert_eq!(data, [0b1000_0000, 0b0010_0110, 0b1100_1111, 0b1110_1010]);
         assert_eq!(bits, 6);  // six bits left over
         assert_eq!(value, 0b101010); // those bits are 0b101010
     }
+
+    //TODO: tests for finalizing the bitstream
 }
