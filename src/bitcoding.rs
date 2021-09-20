@@ -283,7 +283,7 @@ pub fn encode_data_segment(stream: &mut QrBitRecorder, input: &[u8], ec: Encodin
 /// returning a sequence of codewords as a byte array. The finalization entails potentially
 /// appending a terminator sequence, adding zero bits to byte-align the sequence and potentially
 /// adding padding bytes to fill the chosen symbol's capacity exactly.
-pub fn finalize_bitstream(mut stream: QrBitRecorder, size: Size, ecl: ECCLevel) -> Vec<u8> {
+pub fn finalize_bitstream(stream: &mut QrBitRecorder, size: Size, ecl: ECCLevel) -> Vec<u8> {
     let bit_capacity = lookup_capacity(size, ecl).data_bits;
 
     // append terminator bits. At most as many zeroes as specified, and at least as many
