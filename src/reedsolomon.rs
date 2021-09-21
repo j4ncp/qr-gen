@@ -16,7 +16,7 @@ pub fn construct_codewords(rawbits: &[u8], size: Size, ec_level: ECCLevel) -> (V
 
     let block_1_end = (config_data.block_def1.data_codewords * config_data.block_def1.num_blocks) as usize;
 
-    debug_assert_eq!(rawbits.len(), config_data.codewords() as usize);
+    debug_assert_eq!(rawbits.len(), config_data.data_codewords() as usize);
 
     // Divide the data into blocks.
     let mut blocks = Vec::with_capacity(config_data.num_blocks() as usize);

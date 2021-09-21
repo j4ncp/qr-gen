@@ -293,7 +293,7 @@ pub fn finalize_bitstream(stream: &mut QrBitRecorder, size: Size, ecl: ECCLevel)
         assert!(bit_rawdatasize <= bit_capacity, "Too many data bits for chosen symbol size {:?}!", size);
 
         let terminator_bits = cmp::min(bit_capacity - bit_rawdatasize, terminator_length(size));
-        stream.write(terminator_bits, 0).unwrap();
+        stream.write(terminator_bits, 0 as u32).unwrap();
     }
 
     // pad with zeroes to next full byte
@@ -309,10 +309,10 @@ pub fn finalize_bitstream(stream: &mut QrBitRecorder, size: Size, ecl: ECCLevel)
             if (size == Size::Micro(1) || size == Size::Micro(3)) &&
                written + 4 > bit_capacity {
                 // if we are already into those 4 last bits, just pad those with zeroes completely
-                stream.write(bit_capacity - written, 0).unwrap();
+                stream.write(bit_capacity - written, 0 as u32).unwrap();
             } else {
                 // simply add zero padding
-                stream.write(padding, 0).unwrap();
+                stream.write(padding, 0 as u32).unwrap();
             }
         }
     }
@@ -334,7 +334,7 @@ pub fn finalize_bitstream(stream: &mut QrBitRecorder, size: Size, ecl: ECCLevel)
         const PAD_CODEWORDS: [u32; 2] = [0b11101100, 0b00010001];
         for i in 0..bytes_left {
             let padding = PAD_CODEWORDS[i as usize % 2];
-            stream.write(padding, 8).unwrap();
+            stream.write(8, padding).unwrap();
         }
     }
 
@@ -345,10 +345,10 @@ pub fn finalize_bitstream(stream: &mut QrBitRecorder, size: Size, ecl: ECCLevel)
 
         if (size == Size::Micro(1) || size == Size::Micro(3)) && bits_left > 0 {
             assert_eq!(bits_left, 4);
-            stream.write(bits_left, 0).unwrap();
+            stream.write(bits_left, 0 as u32).unwrap();
         } else {
             // otherwise no bits should be left, ever
-            assert_eq!(bits_left, 0);
+            assert_eq!(bits_left, 0 as u32);
         }
     }
 

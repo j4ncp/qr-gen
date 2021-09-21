@@ -7,11 +7,11 @@ extern crate lazy_static;
 
 //pub fn create_qr_code(content: &str)
 
-mod config;
-mod serialization;
-mod rscoding;
-mod bitcoding;
-mod tables;
+pub mod config;
+pub mod serialization;
+pub mod reedsolomon;
+pub mod bitcoding;
+pub mod tables;
 
 
 pub fn create_qr_code(content: &str,

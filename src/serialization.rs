@@ -1,16 +1,19 @@
 use std::cmp;
+use std::io::{Read,Cursor};
 
 use crate::config::{Size, ECCLevel, Encoding};
 
 use image;
 
-// CONSTANTS
-const MARKER_ENCODING_REGION: image::Luma<u8> = image::Luma([100u8]);
-const MARKER_FORMAT_INFORMATION: image::Luma<u8> = image::Luma([120u8]);
-const MARKER_VERSION_INFORMATION: image::Luma<u8> = image::Luma([140u8]);
+use bitstream_io::{BitReader, BitRead, BigEndian};
 
-const BIT_WHITE: image::Luma<u8> = image::Luma([255u8]);
-const BIT_BLACK: image::Luma<u8> = image::Luma([0u8]);
+// CONSTANTS
+pub const MARKER_ENCODING_REGION: image::Luma<u8> = image::Luma([100u8]);
+pub const MARKER_FORMAT_INFORMATION: image::Luma<u8> = image::Luma([120u8]);
+pub const MARKER_VERSION_INFORMATION: image::Luma<u8> = image::Luma([140u8]);
+
+pub const BIT_WHITE: image::Luma<u8> = image::Luma([255u8]);
+pub const BIT_BLACK: image::Luma<u8> = image::Luma([0u8]);
 
 /// Creates a finder pattern image (concentric squares
 /// including the white separator around the finder
@@ -189,7 +192,7 @@ fn create_standard_qt_canvas(size: u8) -> image::GrayImage {
 }
 
 
-fn create_mini_qr_canvas(size: u8) -> image::GrayImage {
+fn create_micro_qr_canvas(size: u8) -> image::GrayImage {
     assert!(size >= 1 && size <= 4);
     let s = 9 + 2 * size as u32 + 4;  // the +4 is for the quiet zone, 2 to each side
     let mut mask = image::GrayImage::from_pixel(s, s, MARKER_ENCODING_REGION);
@@ -244,8 +247,181 @@ fn create_mini_qr_canvas(size: u8) -> image::GrayImage {
 ///        (only present in codes of version 7 or up)
 pub fn create_qr_canvas(size: Size) -> image::GrayImage {
     match size {
-        Size::Micro(s) => create_mini_qr_canvas(s),
+        Size::Micro(s) => create_micro_qr_canvas(s),
         Size::Standard(s) => create_standard_qt_canvas(s)
+    }
+}
+
+
+/// Insert the data into the encoding region of a QR canvas created by the create_qr_canvas function
+///
+pub fn insert_data_payload(canvas: &mut image::GrayImage, size: Size, data_words: &[u8], ecc_words: &[u8]) {
+    // the variables used to step through the cells/modules of the QR symbol.
+    // x_step inverts from 1 to -1 and back in each step, no matter whether the symbol could be placed or not,
+    // y_step inverts only when reaching the borders of the symbol.
+    let mut x_step: i32 = -1;
+    let mut y_step: i32 = -1;
+
+    let mut x_cur: i32 = match size {
+        Size::Micro(i) => 2 + 8 + 2*i as i32,
+        Size::Standard(i) => 4 + 16 + 4*i as i32
+    };
+    let mut y_cur: i32 = x_cur;  // the symbol is square, and we start off from the lower right corner
+
+    // write all data bits
+    {
+        // the number of bits to read from the data_words. For M1 and M3, only the first four bits of
+        // the last byte is used.
+        let bits_to_read = match size {
+            Size::Micro(1) | Size::Micro(3) => data_words.len() * 8 - 4,
+            _ => data_words.len() * 8
+        };
+
+        // create reader and start the process
+        let mut reader =  BitReader::endian(Cursor::new(&data_words), BigEndian);
+
+        for i in 0..bits_to_read {
+            let bit = reader.read_bit().unwrap();
+
+            // place bit
+            canvas[(x_cur as u32, y_cur as u32)] = if bit { BIT_BLACK } else { BIT_WHITE };
+
+            // find next valid place for next bit
+            loop {
+                // check next candidate. Next step is either applying
+                // just x_step (if it is negative) or both x_step and y_step (if x_step is positive)
+                if x_step == -1 {
+                    x_cur = x_cur + x_step;
+                } else {
+                    x_cur = x_cur + x_step;
+                    y_cur = y_cur + y_step;
+                }
+
+                // flip x_step
+                x_step = -x_step;
+
+                // see if we need to turn around on the borders
+                if y_cur < 0 {
+                    y_cur = 0;
+                    y_step = 1;
+                    x_cur = x_cur - 2;
+                } else if y_cur >= canvas.height() as i32 {
+                    y_cur = canvas.height() as i32 - 1;
+                    y_step = -1;
+                    x_cur = x_cur - 2;
+                }
+
+                // if x_cur is negative, there is no chance of finding another
+                // valid encoding pixel
+                if x_cur < 0 {
+                    // this should never happen here, since the EC blocks are not even placed yet!
+                    panic!("Should never get here!");
+                }
+
+                if canvas[(x_cur as u32, y_cur as u32)] == MARKER_ENCODING_REGION {
+                    // found a valid pixel!
+                    break;
+                }
+                // else: go on looping
+            }
+        }
+    }
+
+    // now write all ECC bits. Very similar to data bits. We will also just take the current position
+    // x_cur, y_cur and just go on from there.
+    {
+        // the number of bits to read from the data_words. For M1 and M3, only the first four bits of
+        // the last byte is used.
+        let bits_to_read = ecc_words.len() * 8;
+
+        // create reader and start the process
+        let mut reader =  BitReader::endian(Cursor::new(&ecc_words), BigEndian);
+
+        for i in 0..bits_to_read {
+            let bit = reader.read_bit().unwrap();
+
+            // place bit
+            canvas[(x_cur as u32, y_cur as u32)] = if bit { BIT_BLACK } else { BIT_WHITE };
+
+            // find next valid place for next bit
+            loop {
+                // check next candidate. Next step is either applying
+                // just x_step (if it is negative) or both x_step and y_step (if x_step is positive)
+                if x_step == -1 {
+                    x_cur = x_cur + x_step;
+                } else {
+                    x_cur = x_cur + x_step;
+                    y_cur = y_cur + y_step;
+                }
+
+                // flip x_step
+                x_step = -x_step;
+
+                // see if we need to turn around on the borders
+                if y_cur < 0 {
+                    y_cur = 0;
+                    y_step = 1;
+                    x_cur = x_cur - 2;
+                } else if y_cur >= canvas.height() as i32 {
+                    y_cur = canvas.height() as i32 - 1;
+                    y_step = -1;
+                    x_cur = x_cur - 2;
+                }
+
+                // if x_cur is negative, there is no chance of finding another
+                // valid encoding pixel
+                if x_cur < 0 {
+                    // we can only get here under normal circumstances if the total number of
+                    // codewords fits the symbol exactly, ie. there are no zero padding bits.
+                    break;
+                }
+
+                if canvas[(x_cur as u32, y_cur as u32)] == MARKER_ENCODING_REGION {
+                    // found a valid pixel!
+                    break;
+                }
+                // else: go on looping
+            }
+        }
+    }
+
+    if x_cur > 0 {
+        // if there are still encoding region bits, find the rest of them and zero them out (padding)
+        loop {
+            if canvas[(x_cur as u32, y_cur as u32)] == MARKER_ENCODING_REGION {
+                // found a valid pixel!
+                // set to zero
+                canvas[(x_cur as u32, y_cur as u32)] = BIT_WHITE;
+            }
+
+            // check next candidate. Next step is either applying
+            // just x_step (if it is negative) or both x_step and y_step (if x_step is positive)
+            if x_step == -1 {
+                x_cur = x_cur + x_step;
+            } else {
+                x_cur = x_cur + x_step;
+                y_cur = y_cur + y_step;
+            }
+
+            // flip x_step
+            x_step = -x_step;
+
+            // see if we need to turn around on the borders
+            if y_cur < 0 {
+                y_cur = 0;
+                y_step = 1;
+                x_cur = x_cur - 2;
+            } else if y_cur >= canvas.height() as i32 {
+                y_cur = canvas.height() as i32 - 1;
+                y_step = -1;
+                x_cur = x_cur - 2;
+            }
+
+            // now we are really done
+            if x_cur < 0 {
+                break;
+            }
+        }
     }
 }
 
@@ -293,9 +469,13 @@ mod tests {
     }
 
     #[test]
-    fn test_make_canvasses() {
-        create_qr_canvas(Size::Micro(4)).save("./tmp_micro.png");
+    fn test_standard() {
         create_qr_canvas(Size::Standard(7)).save("./tmp_standard.png");
+    }
+
+    #[test]
+    fn test_micro() {
+        create_qr_canvas(Size::Micro(3)).save("./tmp_micro.png");
     }
 
     #[test]
