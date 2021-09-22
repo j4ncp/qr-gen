@@ -211,6 +211,43 @@ fn compute_mask_score_micro(masked_symbol: &image::GrayImage) -> u32 {
     }
 }
 
+/// Compute best mask and apply it.
+/// Will evaluate all available masks for the given symbol, apply the best mask and return
+/// the code of that mask and resulting masked symbol.
+pub fn apply_best_mask(unmasked_symbol: &image::GrayImage, size: Size) -> (u8, image::GrayImage) {
+    let canvas = create_qr_canvas(size);
+    match size {
+        Size::Micro(_) => {
+            let (best_index, masked_symbol, _) = {
+                (0..4)
+                .map( | index| {
+                    let mut masked_copy = unmasked_symbol.clone();
+                    apply_mask( & mut masked_copy, index, size, & canvas);
+                    let score = compute_mask_score_micro(&masked_copy);
+                    (index, masked_copy, score)
+                })
+                .max_by_key( | data | data.2)  // mask with highest score is best
+                .unwrap()
+            };
+            (best_index, masked_symbol)
+        },
+        Size::Standard(_) => {
+            let (best_index, masked_symbol, _) = {
+                (0..8)
+                .map( | index| {
+                    let mut masked_copy = unmasked_symbol.clone();
+                    apply_mask( & mut masked_copy, index, size, & canvas);
+                    let score = compute_mask_penalty_score_standard(&masked_copy);
+                    (index, masked_copy, score)
+                })
+                .min_by_key( | data | data.2)  // mask with lowest score is best
+                .unwrap()
+            };
+            (best_index, masked_symbol)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
