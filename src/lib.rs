@@ -12,7 +12,6 @@ pub mod serialization;
 pub mod reedsolomon;
 pub mod bitcoding;
 pub mod tables;
-pub mod masking;
 
 pub fn create_qr_code(content: &str,
                       size: Size,

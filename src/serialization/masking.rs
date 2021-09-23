@@ -1,6 +1,6 @@
 
-use crate::config::Size;
-use crate::serialization::*;
+
+use super::*;
 
 use image;
 
@@ -151,7 +151,7 @@ fn compute_mask_penalty_score_standard(masked_symbol: &image::GrayImage) -> u32 
             }
         }
 
-        // subtract 9*N3 for the 9 occurences of the pattern in the finders + quiet space
+        // subtract 9*N3 for the 9 occurrences of the pattern in the finders + quiet space
         score -= 9 * PENALTY_N3;
 
         // same for columns
@@ -171,7 +171,7 @@ fn compute_mask_penalty_score_standard(masked_symbol: &image::GrayImage) -> u32 
             }
         }
 
-        // subtract 9*N3 for the 9 occurences of the pattern in the finders + quiet space
+        // subtract 9*N3 for the 9 occurrences of the pattern in the finders + quiet space
         score -= 9 * PENALTY_N3;
     }
 
@@ -200,7 +200,7 @@ fn compute_mask_score_micro(masked_symbol: &image::GrayImage) -> u32 {
         .count() as u32;
 
     let sum2 = (3..(masked_symbol.width()-2))
-        .map(|x_cur| masked_symbol.get_pixel(x_cur, masked_symbol.height()))
+        .map(|x_cur| masked_symbol.get_pixel(x_cur, masked_symbol.height()-2))
         .filter(|&px| *px == BIT_BLACK)
         .count() as u32;
 

@@ -15,6 +15,9 @@ pub const MARKER_VERSION_INFORMATION: image::Luma<u8> = image::Luma([140u8]);
 pub const BIT_WHITE: image::Luma<u8> = image::Luma([255u8]);
 pub const BIT_BLACK: image::Luma<u8> = image::Luma([0u8]);
 
+
+pub mod masking;
+
 /// Creates a finder pattern image (concentric squares
 /// including the white separator around the finder
 /// pattern)
