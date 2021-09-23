@@ -1,11 +1,10 @@
-use std::cmp;
-use std::io::{Read,Cursor};
-
-use crate::config::{Size, ECCLevel, Encoding};
-
+use bitstream_io::{BigEndian, BitRead, BitReader};
 use image;
 
-use bitstream_io::{BitReader, BitRead, BigEndian};
+use std::cmp;
+use std::io::{Cursor, Read};
+
+use crate::config::{ECCLevel, Encoding, Size};
 
 // CONSTANTS
 pub const MARKER_ENCODING_REGION: image::Luma<u8> = image::Luma([100u8]);
@@ -424,6 +423,147 @@ pub fn insert_data_payload(canvas: &mut image::GrayImage, size: Size, data_words
             if x_cur < 0 {
                 break;
             }
+        }
+    }
+}
+
+//-------------------------------------------------------------------
+// FORMAT & VERSION INFO BITS
+//-------------------------------------------------------------------
+// lookup tables for the added 10 ECC bits plus XORing for both standard and
+// micro QR codes. See table C.1 in Annex C of the standard.
+// The value of the 5 data bits is the index into the lookup table.
+
+const FORMAT_INFOS_QR: [u16; 32] = [
+    0x5412, 0x5125, 0x5e7c, 0x5b4b, 0x45f9, 0x40ce, 0x4f97, 0x4aa0, 0x77c4, 0x72f3, 0x7daa, 0x789d, 0x662f, 0x6318,
+    0x6c41, 0x6976, 0x1689, 0x13be, 0x1ce7, 0x19d0, 0x0762, 0x0255, 0x0d0c, 0x083b, 0x355f, 0x3068, 0x3f31, 0x3a06,
+    0x24b4, 0x2183, 0x2eda, 0x2bed,
+];
+
+const FORMAT_INFOS_MICRO_QR: [u16; 32] = [
+    0x4445, 0x4172, 0x4e2b, 0x4b1c, 0x55ae, 0x5099, 0x5fc0, 0x5af7, 0x6793, 0x62a4, 0x6dfd, 0x68ca, 0x7678, 0x734f,
+    0x7c16, 0x7921, 0x06de, 0x03e9, 0x0cb0, 0x0987, 0x1735, 0x1202, 0x1d5b, 0x186c, 0x2508, 0x203f, 0x2f66, 0x2a51,
+    0x34e3, 0x31d4, 0x3e8d, 0x3bba,
+];
+
+// lookup table for version info bits, works similar to format info
+static VERSION_INFOS: [u32; 34] = [
+    0x07c94, 0x085bc, 0x09a99, 0x0a4d3, 0x0bbf6, 0x0c762, 0x0d847, 0x0e60d, 0x0f928, 0x10b78, 0x1145d, 0x12a17,
+    0x13532, 0x149a6, 0x15683, 0x168c9, 0x177ec, 0x18ec4, 0x191e1, 0x1afab, 0x1b08e, 0x1cc1a, 0x1d33f, 0x1ed75,
+    0x1f250, 0x209d5, 0x216f0, 0x228ba, 0x2379f, 0x24b0b, 0x2542e, 0x26a64, 0x27541, 0x28c69,
+];
+
+
+// coordinates in the QR symbol where to write format and version bits. Do not include quiet region.
+static VERSION_INFO_COORDS_BL: [(i16, i16); 18] = [
+    (5, -9), (5, -10), (5, -11),
+    (4, -9), (4, -10), (4, -11),
+    (3, -9), (3, -10), (3, -11),
+    (2, -9), (2, -10), (2, -11),
+    (1, -9), (1, -10), (1, -11),
+    (0, -9), (0, -10), (0, -11),
+];
+
+static VERSION_INFO_COORDS_TR: [(i16, i16); 18] = [
+    (-9, 5), (-10, 5), (-11, 5),
+    (-9, 4), (-10, 4), (-11, 4),
+    (-9, 3), (-10, 3), (-11, 3),
+    (-9, 2), (-10, 2), (-11, 2),
+    (-9, 1), (-10, 1), (-11, 1),
+    (-9, 0), (-10, 0), (-11, 0),
+];
+
+static FORMAT_INFO_COORDS_QR_MAIN: [(i16, i16); 15] = [
+    (0, 8), (1, 8), (2, 8), (3, 8), (4, 8), (5, 8), (7, 8), (8, 8),
+    (8, 7), (8, 5), (8, 4), (8, 3), (8, 2), (8, 1), (8, 0),
+];
+
+static FORMAT_INFO_COORDS_QR_SIDE: [(i16, i16); 15] = [
+    (8, -1), (8, -2), (8, -3), (8, -4), (8, -5), (8, -6), (8, -7), (-8, 8),
+    (-7, 8), (-6, 8), (-5, 8), (-4, 8), (-3, 8), (-2, 8), (-1, 8),
+];
+
+static FORMAT_INFO_COORDS_MICRO_QR: [(i16, i16); 15] = [
+    (1, 8), (2, 8), (3, 8), (4, 8), (5, 8), (6, 8), (7, 8), (8, 8),
+    (8, 7), (8, 6), (8, 5), (8, 4), (8, 3), (8, 2), (8, 1),
+];
+
+// helper function to write format or version bits to given coordinates in QR code
+// bits are the bits actually to be written (big-endian order), num_bits is how many
+// bits to write. Obviously this function supports writing only up to 32 bits at a time
+fn insert_bits_at(symbol: &mut image::GrayImage, bits: u32, num_bits: u32, coords: &[(i16, i16)], size: Size) {
+    let mut mask = 1 << (num_bits - 1);
+
+    let (symbol_size, quiet_offset) = match size {
+        Size::Micro(i) => (9+2*i as i16, 2),
+        Size::Standard(i) => (17+4*i as i16, 4)
+    };
+
+    for &(xoff, yoff) in coords {
+        let color = if (mask & bits) == 0 { BIT_WHITE } else { BIT_BLACK };
+        let x = quiet_offset + if xoff < 0 { xoff + symbol_size } else { xoff };
+        let y = quiet_offset + if yoff < 0 { yoff + symbol_size } else { yoff };
+        symbol[(x as u32, y as u32)] = color;
+        mask >>= 1;
+    }
+}
+
+
+/// compute the 15bits long format bits "format info" specifier, which contains
+/// information about the used mask and ECCLevel
+fn compute_format_info_bits(size: Size, ecl: ECCLevel, mask_pattern: u8) -> u16 {
+    match size {
+        Size::Micro(i) => {
+            let data_bits = match (i, ecl) {
+                (1, ECCLevel::L) => 0b00000,
+                (2, ECCLevel::L) => 0b00100,
+                (2, ECCLevel::M) => 0b01000,
+                (3, ECCLevel::L) => 0b01100,
+                (3, ECCLevel::M) => 0b10000,
+                (4, ECCLevel::L) => 0b10100,
+                (4, ECCLevel::M) => 0b11000,
+                (4, ECCLevel::Q) => 0b11100,
+                _ => panic!("Invalid combination of size and ECC level")
+            } as usize | (mask_pattern as usize);
+            FORMAT_INFOS_MICRO_QR[data_bits]
+        },
+        Size::Standard(i) => {
+            let data_bits = match ecl {
+                ECCLevel::L => 0b01000,
+                ECCLevel::M => 0b00000,
+                ECCLevel::Q => 0b11000,
+                ECCLevel::H => 0b10000
+            } as usize | (mask_pattern as usize);
+            FORMAT_INFOS_QR[data_bits]
+        }
+    }
+}
+
+/// Compute and write format bits into symbol
+pub fn insert_format_info(symbol: &mut image::GrayImage, size: Size, ecl: ECCLevel, mask_pattern: u8) {
+    let format_bits = compute_format_info_bits(size, ecl, mask_pattern);
+
+    match size {
+        Size::Micro(_) => {
+            insert_bits_at(symbol, format_bits as u32, 15, &FORMAT_INFO_COORDS_MICRO_QR, size);
+        },
+        Size::Standard(i) => {
+            insert_bits_at(symbol, format_bits as u32, 15, &FORMAT_INFO_COORDS_QR_MAIN, size);
+            insert_bits_at(symbol, format_bits as u32, 15, &FORMAT_INFO_COORDS_QR_SIDE, size);
+            symbol[(12, 13+4*i as u32)] = BIT_BLACK;
+        }
+    }
+}
+
+/// Compute and insert version info bits into symbol
+/// Only does something for >= version 7 symbols.
+pub fn insert_version_info(symbol: &mut image::GrayImage, size: Size) {
+    if let Size::Standard(i) = size {
+        if i >= 7 {
+            let version_bits = VERSION_INFOS[(i-7) as usize];
+
+            insert_bits_at(symbol, version_bits, 18, &VERSION_INFO_COORDS_BL, size);
+            insert_bits_at(symbol, version_bits, 18, &VERSION_INFO_COORDS_TR, size);
         }
     }
 }
