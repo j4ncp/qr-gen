@@ -4,7 +4,7 @@ use image;
 use std::cmp;
 use std::io::{Cursor, Read};
 
-use crate::config::{ECCLevel, Encoding, Size};
+use crate::config::{ECCLevel, Size};
 
 // CONSTANTS
 pub const MARKER_ENCODING_REGION: image::Luma<u8> = image::Luma([100u8]);
@@ -282,7 +282,7 @@ pub fn insert_data_payload(canvas: &mut image::GrayImage, size: Size, data_words
         // create reader and start the process
         let mut reader =  BitReader::endian(Cursor::new(&data_words), BigEndian);
 
-        for i in 0..bits_to_read {
+        for _i in 0..bits_to_read {
             let bit = reader.read_bit().unwrap();
 
             // place bit
@@ -339,7 +339,7 @@ pub fn insert_data_payload(canvas: &mut image::GrayImage, size: Size, data_words
         // create reader and start the process
         let mut reader =  BitReader::endian(Cursor::new(&ecc_words), BigEndian);
 
-        for i in 0..bits_to_read {
+        for _i in 0..bits_to_read {
             let bit = reader.read_bit().unwrap();
 
             // place bit
@@ -527,7 +527,7 @@ fn compute_format_info_bits(size: Size, ecl: ECCLevel, mask_pattern: u8) -> u16 
             } as usize | (mask_pattern as usize);
             FORMAT_INFOS_MICRO_QR[data_bits]
         },
-        Size::Standard(i) => {
+        Size::Standard(_) => {
             let data_bits = match ecl {
                 ECCLevel::L => 0b01000,
                 ECCLevel::M => 0b00000,
@@ -613,12 +613,12 @@ mod tests {
 
     #[test]
     fn test_standard() {
-        create_qr_canvas(Size::Standard(7)).save("./tmp_standard.png");
+        create_qr_canvas(Size::Standard(7)).save("./tmp_standard.png").unwrap();
     }
 
     #[test]
     fn test_micro() {
-        create_qr_canvas(Size::Micro(3)).save("./tmp_micro.png");
+        create_qr_canvas(Size::Micro(3)).save("./tmp_micro.png").unwrap();
     }
 
     #[test]
