@@ -60,7 +60,6 @@ fn create_alignment_pattern_coord_list(size: u8) -> Vec<i32> {
         row.push((a+b) / 2);
         row.push(b);
     } else if size >= 21 && size < 28 {
-        // TODO
         let b = ((size as i32 - 21) / 2) * 4 + 50;
         let d = (size as i32 - 21) * 4 + 94;
         row.push(match size {
@@ -121,115 +120,6 @@ fn get_alignment_pattern_points(size: u8) -> Vec<(i32, i32)> {
     points
 }
 
-/// Creates
-fn create_standard_qt_canvas(size: u8) -> image::GrayImage {
-    assert!(size >= 1 && size <= 40);
-    let s = 17 + 4 * size as u32 + 8; // the +8 is for the quiet zone, 4 to each side
-    let mut mask = image::GrayImage::from_pixel(s, s, MARKER_ENCODING_REGION);
-
-    // mark quiet area
-    for i in 0..s {
-        for j in 0..4 {
-            mask[(j, i)] = BIT_WHITE;
-            mask[(i, j)] = BIT_WHITE;
-            mask[(s - j - 1, i)] = BIT_WHITE;
-            mask[(i, s - j - 1)] = BIT_WHITE;
-        }
-    }
-
-    // apply 3 finder patterns in top and left corners
-    let finder = create_finder_pattern();
-    image::imageops::overlay(&mut mask, &finder, 3, 3);
-    image::imageops::overlay(&mut mask, &finder, 3, s - 12);
-    image::imageops::overlay(&mut mask, &finder, s - 12, 3);
-
-    // mark timing patterns
-    for i in 10..s-12 {
-        let val = if i % 2 == 0 {BIT_BLACK} else {BIT_WHITE};
-        mask[(10, i)] = val;
-        mask[(i, 10)] = val;
-    }
-
-    // alignment patterns only for version >= 2
-    if size >= 2 {
-        // retrieve point list of alignment pattern center points
-        let points = get_alignment_pattern_points(size);
-        // get a pattern image
-        let pattern = create_alignment_pattern();
-        // paint them onto canvas
-        for (x, y) in points {
-            // the offset +2 we get by +4 from the quiet border
-            // and -2 from the pattern center offset
-            image::imageops::overlay(&mut mask, &pattern, x as u32 + 2, y as u32 + 2);
-        }
-    }
-
-    // mark format bits
-    for i in 0..6 {
-        mask[(12, 4+i)] = MARKER_FORMAT_INFORMATION;
-        mask[(4+i, 12)] = MARKER_FORMAT_INFORMATION;
-        mask[(s-5-i, 12)] = MARKER_FORMAT_INFORMATION;
-        mask[(12, s-5-i)] = MARKER_FORMAT_INFORMATION;
-    }
-    mask[(12, 11)] = MARKER_FORMAT_INFORMATION;
-    mask[(11, 12)] = MARKER_FORMAT_INFORMATION;
-    mask[(12, 12)] = MARKER_FORMAT_INFORMATION;
-    mask[(12, s-11)] = MARKER_FORMAT_INFORMATION;
-    mask[(12, s-12)] = MARKER_FORMAT_INFORMATION;
-    mask[(s-11, 12)] = MARKER_FORMAT_INFORMATION;
-    mask[(s-12, 12)] = MARKER_FORMAT_INFORMATION;
-
-    // mark version bits if applicable
-    if size >= 7 {
-        for i in 0..6 {
-            for j in 0..3 {
-                mask[(4+i, s-13-j)] = MARKER_FORMAT_INFORMATION;
-                mask[(s-13-j, 4+i)] = MARKER_FORMAT_INFORMATION;
-            }
-        }
-    }
-
-    // return canvas
-    mask
-}
-
-
-fn create_micro_qr_canvas(size: u8) -> image::GrayImage {
-    assert!(size >= 1 && size <= 4);
-    let s = 9 + 2 * size as u32 + 4;  // the +4 is for the quiet zone, 2 to each side
-    let mut mask = image::GrayImage::from_pixel(s, s, MARKER_ENCODING_REGION);
-
-    // mark quiet area
-    for i in 0..s {
-        for j in 0..2 {
-            mask[(j, i)] = BIT_WHITE;
-            mask[(i, j)] = BIT_WHITE;
-            mask[(s - j - 1, i)] = BIT_WHITE;
-            mask[(i, s - j - 1)] = BIT_WHITE;
-        }
-    }
-
-    // apply finder pattern
-    image::imageops::overlay(&mut mask, &create_finder_pattern(), 1, 1);
-
-    // mark timing patterns
-    for i in 10..s-2 {
-        let val = if i % 2 == 0 {BIT_BLACK} else {BIT_WHITE};
-        mask[(2, i)] = val;
-        mask[(i, 2)] = val;
-    }
-
-    // no alignment patterns
-
-    // mark format bits
-    for i in 3..11 {
-        mask[(10, i)] = MARKER_FORMAT_INFORMATION;
-        mask[(i, 10)] = MARKER_FORMAT_INFORMATION;
-    }
-
-    // return canvas
-    mask
-}
 
 /// Return a basic QR image with all the functional patterns
 /// painted in: the finder patterns, alignment patterns
@@ -248,10 +138,88 @@ fn create_micro_qr_canvas(size: u8) -> image::GrayImage {
 ///        right and lower left finder) 2x 18bits
 ///        (only present in codes of version 7 or up)
 pub fn create_qr_canvas(size: Size) -> image::GrayImage {
-    match size {
-        Size::Micro(s) => create_micro_qr_canvas(s),
-        Size::Standard(s) => create_standard_qt_canvas(s)
+    let q = size.quiet_region_size();
+    let s =  size.dimensions() + 2 * q;
+    let mut mask = image::GrayImage::from_pixel(s, s, MARKER_ENCODING_REGION);
+
+    // mark quiet area
+    for i in 0..s {
+        for j in 0..q {
+            mask[(j, i)] = BIT_WHITE;
+            mask[(i, j)] = BIT_WHITE;
+            mask[(s - j - 1, i)] = BIT_WHITE;
+            mask[(i, s - j - 1)] = BIT_WHITE;
+        }
     }
+
+    // apply finder patterns
+    let finder = create_finder_pattern();
+    image::imageops::overlay(&mut mask, &finder, q - 1, q - 1);
+    if !size.is_micro() {
+        image::imageops::overlay(&mut mask, &finder, q - 1, s - 12);
+        image::imageops::overlay(&mut mask, &finder, s - 12, q - 1);
+    }
+
+    // mark timing patterns
+    {
+        let t_off = if size.is_micro() { 2 } else { 10 };
+        let s_end = if size.is_micro() { s - 2 } else { s - 12 };
+
+        for i in 10..s_end {
+            let val = if i % 2 == 0 {BIT_BLACK} else {BIT_WHITE};
+            mask[(t_off, i)] = val;
+            mask[(i, t_off)] = val;
+        }
+    }
+
+    // alignment patterns only for version >= 2
+    if !size.is_micro() && size.version() >= 2 {
+        // retrieve point list of alignment pattern center points
+        let points = get_alignment_pattern_points(size.version());
+        // get a pattern image
+        let pattern = create_alignment_pattern();
+        // paint them onto canvas
+        for (x, y) in points {
+            // the offset +2 we get by +4 from the quiet border
+            // and -2 from the pattern center offset
+            image::imageops::overlay(&mut mask, &pattern, x as u32 + 2, y as u32 + 2);
+        }
+    }
+
+    // mark format bits
+    if size.is_micro() {
+        for i in 3..11 {
+            mask[(10, i)] = MARKER_FORMAT_INFORMATION;
+            mask[(i, 10)] = MARKER_FORMAT_INFORMATION;
+        }
+    } else {
+        for i in 0..6 {
+            mask[(12, 4+i)] = MARKER_FORMAT_INFORMATION;
+            mask[(4+i, 12)] = MARKER_FORMAT_INFORMATION;
+            mask[(s-5-i, 12)] = MARKER_FORMAT_INFORMATION;
+            mask[(12, s-5-i)] = MARKER_FORMAT_INFORMATION;
+        }
+        mask[(12, 11)] = MARKER_FORMAT_INFORMATION;
+        mask[(11, 12)] = MARKER_FORMAT_INFORMATION;
+        mask[(12, 12)] = MARKER_FORMAT_INFORMATION;
+        mask[(12, s-11)] = MARKER_FORMAT_INFORMATION;
+        mask[(12, s-12)] = MARKER_FORMAT_INFORMATION;
+        mask[(s-11, 12)] = MARKER_FORMAT_INFORMATION;
+        mask[(s-12, 12)] = MARKER_FORMAT_INFORMATION;
+    }
+
+    // mark version bits if applicable
+    if !size.is_micro() && size.version() >= 7 {
+        for i in 0..6 {
+            for j in 0..3 {
+                mask[(q+i, s-13-j)] = MARKER_VERSION_INFORMATION;
+                mask[(s-13-j, q+i)] = MARKER_VERSION_INFORMATION;
+            }
+        }
+    }
+
+    // return canvas
+    mask
 }
 
 
@@ -264,10 +232,7 @@ pub fn insert_data_payload(canvas: &mut image::GrayImage, size: Size, data_words
     let mut x_step: i32 = -1;
     let mut y_step: i32 = -1;
 
-    let mut x_cur: i32 = match size {
-        Size::Micro(i) => 2 + 8 + 2*i as i32,
-        Size::Standard(i) => 4 + 16 + 4*i as i32
-    };
+    let mut x_cur: i32 = size.quiet_region_size() as i32 + size.dimensions() as i32 - 1;
     let mut y_cur: i32 = x_cur;  // the symbol is square, and we start off from the lower right corner
 
     // write all data bits
@@ -494,10 +459,8 @@ static FORMAT_INFO_COORDS_MICRO_QR: [(i16, i16); 15] = [
 fn insert_bits_at(symbol: &mut image::GrayImage, bits: u32, num_bits: u32, coords: &[(i16, i16)], size: Size) {
     let mut mask = 1 << (num_bits - 1);
 
-    let (symbol_size, quiet_offset) = match size {
-        Size::Micro(i) => (9+2*i as i16, 2),
-        Size::Standard(i) => (17+4*i as i16, 4)
-    };
+    let symbol_size = size.dimensions() as i16;
+    let quiet_offset = size.quiet_region_size() as i16;
 
     for &(xoff, yoff) in coords {
         let color = if (mask & bits) == 0 { BIT_WHITE } else { BIT_BLACK };
@@ -578,37 +541,13 @@ mod tests {
 
     #[test]
     fn test_canvas_sizes() {
-        assert_eq!(create_qr_canvas(Size::Micro(1)).dimensions(), (11+4, 11+4));
-        assert_eq!(create_qr_canvas(Size::Micro(2)).dimensions(), (13+4, 13+4));
-        assert_eq!(create_qr_canvas(Size::Micro(3)).dimensions(), (15+4, 15+4));
-        assert_eq!(create_qr_canvas(Size::Micro(4)).dimensions(), (17+4, 17+4));
-        assert_eq!(create_qr_canvas(Size::Standard(1)).dimensions(), (21+8, 21+8));
-        assert_eq!(create_qr_canvas(Size::Standard(2)).dimensions(), (25+8, 25+8));
-        assert_eq!(create_qr_canvas(Size::Standard(40)).dimensions(), (177+8, 177+8));
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_invalid_size1() {
-        create_qr_canvas(Size::Micro(0));
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_invalid_size2() {
-        create_qr_canvas(Size::Micro(5));
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_invalid_size3() {
-        create_qr_canvas(Size::Standard(0));
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_invalid_size4() {
-        create_qr_canvas(Size::Standard(41));
+        assert_eq!(create_qr_canvas(Size::Micro(1)).dimensions(), (11 + 4, 11 + 4));
+        assert_eq!(create_qr_canvas(Size::Micro(2)).dimensions(), (13 + 4, 13 + 4));
+        assert_eq!(create_qr_canvas(Size::Micro(3)).dimensions(), (15 + 4, 15 + 4));
+        assert_eq!(create_qr_canvas(Size::Micro(4)).dimensions(), (17 + 4, 17 + 4));
+        assert_eq!(create_qr_canvas(Size::Standard(1)).dimensions(), (21 + 8, 21 + 8));
+        assert_eq!(create_qr_canvas(Size::Standard(2)).dimensions(), (25 + 8, 25 + 8));
+        assert_eq!(create_qr_canvas(Size::Standard(40)).dimensions(), (177 + 8, 177 + 8));
     }
 
     #[test]

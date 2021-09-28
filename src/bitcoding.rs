@@ -14,18 +14,17 @@ pub type QrBitWriter<'a> = BitWriter<&'a mut Vec<u8>, BigEndian>;
 
 
 fn write_mode_indicator(stream: &mut QrBitRecorder, size: Size, ec: Encoding) {
-    if let Size::Micro(i) = size {
-        if i == 1 {
-            // no mode indicator for M1 tags
-            return;
-        } else if i == 2 {
+    match size {
+        Size::Micro(1) => {},
+        Size::Micro(2) => {
             // one bit: 0 => Numeric, 1 => Alphanumeric
             stream.write(1, match ec {
                 Encoding::Numeric => 0,
                 Encoding::Alphanumeric => 1,
                 _ => panic!("Invalid encoding mode for chosen size!")
             }).unwrap();
-        } else if i == 3 {
+        },
+        Size::Micro(3) => {
             // two bits
             stream.write(2, match ec {
                 Encoding::Numeric => 0b00,
@@ -33,7 +32,8 @@ fn write_mode_indicator(stream: &mut QrBitRecorder, size: Size, ec: Encoding) {
                 Encoding::Bytes => 0b10,
                 Encoding::Kanji => 0b11
             }).unwrap();
-        } else if i == 4 {
+        },
+        Size::Micro(4) => {
             // three bits
             stream.write(3, match ec {
                 Encoding::Numeric => 0b000,
@@ -41,81 +41,23 @@ fn write_mode_indicator(stream: &mut QrBitRecorder, size: Size, ec: Encoding) {
                 Encoding::Bytes => 0b010,
                 Encoding::Kanji => 0b011
             }).unwrap();
-        }
-    } else if let Size::Standard(_) = size {
-        stream.write(4, match ec {
-            Encoding::Numeric => 0b0001,
-            Encoding::Alphanumeric => 0b0010,
-            Encoding::Bytes => 0b0100,
-            Encoding::Kanji => 0b1000
-        }).unwrap();
-    }
-}
-
-fn write_charcount_indicator(stream: &mut QrBitRecorder, count: u32, size: Size, ec: Encoding) {
-    let num_bits = match size {
-        Size::Micro(1) => match ec {
-            Encoding::Numeric => 3,
-            _ => panic!("Invalid combination of encoding and size!")
         },
-        Size::Micro(2) => match ec {
-            Encoding::Numeric => 4,
-            Encoding::Alphanumeric => 3,
-            _ => panic!("Invalid combination of encoding and size!")
+        Size::Standard(_) => {
+            stream.write(4, match ec {
+                Encoding::Numeric => 0b0001,
+                Encoding::Alphanumeric => 0b0010,
+                Encoding::Bytes => 0b0100,
+                Encoding::Kanji => 0b1000
+            }).unwrap();
         },
-        Size::Micro(3) => match ec {
-            Encoding::Numeric => 5,
-            Encoding::Alphanumeric => 4,
-            Encoding::Bytes => 4,
-            Encoding::Kanji => 3
-        },
-        Size::Micro(4) => match ec {
-            Encoding::Numeric => 6,
-            Encoding::Alphanumeric => 5,
-            Encoding::Bytes => 5,
-            Encoding::Kanji => 4
-        },
-        Size::Standard(i) => {
-            if i >= 1 && i <= 9 {
-                match ec {
-                    Encoding::Numeric => 10,
-                    Encoding::Alphanumeric => 9,
-                    Encoding::Bytes => 8,
-                    Encoding::Kanji => 8
-                }
-            } else if i >= 10 && i <= 26 {
-                match ec {
-                    Encoding::Numeric => 12,
-                    Encoding::Alphanumeric => 11,
-                    Encoding::Bytes => 16,
-                    Encoding::Kanji => 10
-                }
-            } else /* i >= 27 && i <= 40 */ {
-                match ec {
-                    Encoding::Numeric => 14,
-                    Encoding::Alphanumeric => 13,
-                    Encoding::Bytes => 16,
-                    Encoding::Kanji => 12
-                }
-            }
-        },
-        _ => panic!("Invalid index given for micro Qr code")
-    };
-    stream.write(num_bits, count).unwrap();
-}
-
-/// Retrieve the number of terminator bits for the given Symbol size
-/// (those bits would all be zeroes)
-fn terminator_length(size: Size) -> u32 {
-    // write a specified number of zeroes, depending on the code model
-    match size {
-        Size::Micro(1) => 3,
-        Size::Micro(2) => 5,
-        Size::Micro(3) => 7,
-        Size::Micro(4) => 9,
-        Size::Standard(_) => 4,
         _ => panic!("Invalid size given")
     }
+}
+
+/// write character count indicator to the bitstream. The interesting part is how many bits
+/// are used for this, which is given by a helper member of Encoding
+fn write_charcount_indicator(stream: &mut QrBitRecorder, count: u32, size: Size, ec: Encoding) {
+    stream.write(ec.num_char_count_bits(size) as u32, count).unwrap();
 }
 
 /// Write an ECI header to the bitstream, which changes the interpretation
@@ -292,7 +234,7 @@ pub fn finalize_bitstream(stream: &mut QrBitRecorder, size: Size, ecl: ECCLevel)
         let bit_rawdatasize = stream.written();
         assert!(bit_rawdatasize <= bit_capacity, "Too many data bits for chosen symbol size {:?}!", size);
 
-        let terminator_bits = cmp::min(bit_capacity - bit_rawdatasize, terminator_length(size));
+        let terminator_bits = cmp::min(bit_capacity - bit_rawdatasize, size.terminator_length() as u32);
         stream.write(terminator_bits, 0 as u32).unwrap();
     }
 
@@ -378,17 +320,21 @@ pub fn finalize_bitstream(stream: &mut QrBitRecorder, size: Size, ecl: ECCLevel)
 mod tests {
     use super::*;
 
+    fn to_bytes(rec: QrBitRecorder) -> (Vec<u8>, u32, u8) {
+        let mut data: Vec<u8> = Vec::new();
+        let (bits, value) = {
+            let mut writer = QrBitWriter::new(&mut data);
+            rec.playback(&mut writer).unwrap();
+            writer.into_unwritten()
+        };
+        (data, bits, value)
+    }
+
     #[test]
     fn test_numeric_example_1() {
         let mut recorder = QrBitRecorder::new();
         encode_data_segment(&mut recorder, b"01234567", Encoding::Numeric, Size::Standard(1));
-
-        let mut data: Vec<u8> = Vec::new();
-        let (bits, value) = {
-            let mut writer = QrBitWriter::new(&mut data);
-            recorder.playback(&mut writer).unwrap();
-            writer.into_unwritten()
-        };
+        let (data, bits, value) = to_bytes(recorder);
         assert_eq!(data, [0b0001_0000, 0b0010_0000, 0b0000_1100, 0b0101_0110, 0b0110_0001]);
         assert_eq!(bits, 1);  // one bit left over
         assert_eq!(value, 1); // that bit is a 1
@@ -398,13 +344,7 @@ mod tests {
     fn test_numeric_example_2() {
         let mut recorder = QrBitRecorder::new();
         encode_data_segment(&mut recorder, b"0123456789012345", Encoding::Numeric, Size::Micro(3));
-
-        let mut data: Vec<u8> = Vec::new();
-        let (bits, value) = {
-            let mut writer = QrBitWriter::new(&mut data);
-            recorder.playback(&mut writer).unwrap();
-            writer.into_unwritten()
-        };
+        let (data, bits, value) = to_bytes(recorder);
         assert_eq!(data, [0b0010_0000, 0b0000_0110, 0b0010_1011, 0b0011_0101, 0b0011_0111,
                           0b0000_1010, 0b0111_0101]);
         assert_eq!(bits, 5);  // five bits left over
@@ -415,13 +355,7 @@ mod tests {
     fn test_alphanumeric_example() {
         let mut recorder = QrBitRecorder::new();
         encode_data_segment(&mut recorder, b"AC-42", Encoding::Alphanumeric, Size::Standard(1));
-
-        let mut data: Vec<u8> = Vec::new();
-        let (bits, value) = {
-            let mut writer = QrBitWriter::new(&mut data);
-            recorder.playback(&mut writer).unwrap();
-            writer.into_unwritten()
-        };
+        let (data, bits, value) = to_bytes(recorder);
         assert_eq!(data, [0b0010_0000, 0b0010_1001, 0b1100_1110, 0b1110_0111, 0b0010_0001]);
         assert_eq!(bits, 1);  // one bit left over
         assert_eq!(value, 0); // value of that bit is zero
@@ -431,13 +365,7 @@ mod tests {
     fn test_kanji_example() {
         let mut recorder = QrBitRecorder::new();
         encode_data_segment(&mut recorder, &[0x93, 0x5F, 0xE4, 0xAA], Encoding::Kanji, Size::Standard(1));
-
-        let mut data: Vec<u8> = Vec::new();
-        let (bits, value) = {
-            let mut writer = QrBitWriter::new(&mut data);
-            recorder.playback(&mut writer).unwrap();
-            writer.into_unwritten()
-        };
+        let (data, bits, value) = to_bytes(recorder);
         assert_eq!(data, [0b1000_0000, 0b0010_0110, 0b1100_1111, 0b1110_1010]);
         assert_eq!(bits, 6);  // six bits left over
         assert_eq!(value, 0b101010); // those bits are 0b101010
